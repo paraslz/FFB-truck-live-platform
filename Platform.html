@@ -40,7 +40,7 @@
                 app = initializeApp(firebaseConfig);
                 auth = getAuth(app);
                 db = getFirestore(app);
-                setLogLevel('error'); // Use 'debug' for detailed logs
+                setLogLevel('error'); 
 
                 onAuthStateChanged(auth, async (user) => {
                     if (user) {
@@ -78,16 +78,13 @@
         const statusOptionOngoing = document.getElementById('status-option-ongoing');
         const statusOptionIdle = document.getElementById('status-option-idle');
         const statusOptionOtherDuty = document.getElementById('status-option-other-duty');
-
         const ongoingTripGroup = document.getElementById('ongoing-trip-group');
         const idleReasonGroup = document.getElementById('idle-reason-group');
         const otherDutyGroup = document.getElementById('other-duty-group');
-
         const newDestinationInput = document.getElementById('new-destination');
         const idleReasonSelect = document.getElementById('idle-reason-select');
         const otherDutySelect = document.getElementById('other-duty-select');
         const otherDutyDetailInput = document.getElementById('other-duty-detail');
-
 
         let currentTruckToUpdate = null;
         let truckListeners = [];
@@ -108,14 +105,12 @@
             });
             addTruckForm.addEventListener('submit', handleAddTruck);
 
-            // Modal controls
             closeModalButton.addEventListener('click', () => updateModal.classList.add('hidden'));
             updateModal.addEventListener('click', (e) => {
                 if (e.target === updateModal) updateModal.classList.add('hidden');
             });
             updateForm.addEventListener('submit', handleUpdateStatus);
 
-            // Modal radio button change listeners to show/hide sections
             const statusOptions = [statusOptionCompleted, statusOptionOngoing, statusOptionIdle, statusOptionOtherDuty];
             statusOptions.forEach(radio => {
                 radio.addEventListener('change', () => {
@@ -195,38 +190,40 @@
             if (!currentTruckToUpdate) return;
 
             const truckDocRef = doc(db, `artifacts/${appId}/users/${userId}/trucks`, currentTruckToUpdate);
-            let updateData = {};
-            let successMessage = '';
-
+            
             try {
+                const truckDoc = await getDoc(truckDocRef);
+                if (!truckDoc.exists()) throw new Error("Truck not found");
+                const currentTruckData = truckDoc.data();
+                
+                const newTimestamp = Timestamp.now();
+                
+                // Log the previous activity that is now ending
+                const activityLogRef = collection(db, `artifacts/${appId}/users/${userId}/activity_logs`);
+                await addDoc(activityLogRef, {
+                    truckNumber: currentTruckData.truckNumber,
+                    status: currentTruckData.status,
+                    detail: currentTruckData.detail,
+                    startTime: currentTruckData.lastStatusUpdate,
+                    endTime: newTimestamp
+                });
+
+                let updateData = {};
+                let successMessage = '';
+                
+                // Determine the new status and details
                 if (statusOptionCompleted.checked) {
-                    const truckDoc = await getDoc(truckDocRef);
-                    if (!truckDoc.exists()) throw new Error("Truck not found");
-                    const truckData = truckDoc.data();
-
-                    if (truckData.status === 'Ongoing Trip') {
-                        const tripsCollectionRef = collection(db, `artifacts/${appId}/users/${userId}/trips`);
-                        await addDoc(tripsCollectionRef, {
-                            truckNumber: truckData.truckNumber,
-                            startTime: truckData.lastStatusUpdate,
-                            endTime: serverTimestamp(),
-                            destination: truckData.detail
-                        });
-                    }
-                    updateData = { status: 'Idle', detail: 'N/A', lastStatusUpdate: serverTimestamp() };
-                    successMessage = `Truck ${currentTruckToUpdate} is now Idle.`;
-
+                    updateData = { status: 'Idle', detail: 'N/A', lastStatusUpdate: newTimestamp };
+                    successMessage = `Truck ${currentTruckToUpdate} completed its trip and is now Idle.`;
                 } else if (statusOptionOngoing.checked) {
                     const newDestination = newDestinationInput.value.trim();
                     if (!newDestination) return displayMessage("Please enter a destination.", "error");
-                    updateData = { status: 'Ongoing Trip', detail: newDestination, lastStatusUpdate: serverTimestamp() };
+                    updateData = { status: 'Ongoing Trip', detail: newDestination, lastStatusUpdate: newTimestamp };
                     successMessage = `Truck ${currentTruckToUpdate} is on its way to ${newDestination}.`;
-
                 } else if (statusOptionIdle.checked) {
                     const reason = idleReasonSelect.value;
-                    updateData = { status: `Idle (${reason})`, detail: 'N/A', lastStatusUpdate: serverTimestamp() };
+                    updateData = { status: 'Idle', detail: reason, lastStatusUpdate: newTimestamp };
                     successMessage = `Truck ${currentTruckToUpdate} status set to Idle (${reason}).`;
-
                 } else if (statusOptionOtherDuty.checked) {
                     let duty = otherDutySelect.value;
                     if (duty === 'Others') {
@@ -234,7 +231,7 @@
                         if (!customDuty) return displayMessage("Please specify the 'other' duty.", "error");
                         duty = customDuty;
                     }
-                    updateData = { status: 'On Other Duty', detail: duty, lastStatusUpdate: serverTimestamp() };
+                    updateData = { status: 'On Other Duty', detail: duty, lastStatusUpdate: newTimestamp };
                     successMessage = `Truck ${currentTruckToUpdate} is now On Other Duty: ${duty}.`;
                 }
 
@@ -259,6 +256,9 @@
             card.id = `truck-${truckNumber.replace(/\s+/g, '-')}`;
 
             let statusColorClass = 'bg-gray-100 text-gray-800';
+            let displayStatus = status;
+            if (status === 'Idle' && detail !== 'N/A') displayStatus = `Idle (${detail})`;
+
             if (status.startsWith('Idle')) statusColorClass = 'bg-yellow-100 text-yellow-800 border-yellow-300';
             if (status === 'Ongoing Trip') statusColorClass = 'bg-green-100 text-green-800 border-green-300';
             if (status === 'On Other Duty') statusColorClass = 'bg-purple-100 text-purple-800 border-purple-300';
@@ -274,7 +274,7 @@
                 <div>
                     <div class="flex justify-between items-start">
                         <h3 class="text-xl font-bold text-gray-800">${truckNumber}</h3>
-                        <span class="text-xs font-semibold px-2.5 py-0.5 rounded-full ${statusColorClass}">${status}</span>
+                        <span class="text-xs font-semibold px-2.5 py-0.5 rounded-full ${statusColorClass}">${displayStatus}</span>
                     </div>
                     ${detailHtml}
                 </div>
@@ -340,7 +340,7 @@
         // --- REPORTING ---
         async function generateReport(period) {
             if (!isAuthReady) return;
-            reportContainer.innerHTML = '<p class="text-gray-500">Generating report...</p>';
+            reportContainer.innerHTML = '<p class="text-gray-500">Generating detailed report...</p>';
             const now = new Date();
             let startDate;
             if (period === 'daily') startDate = new Date(now.getFullYear(), now.getMonth(), now.getDate());
@@ -350,52 +350,85 @@
             } else startDate = new Date(now.getFullYear(), now.getMonth(), 1);
             
             const startTimestamp = Timestamp.fromDate(startDate);
-            const periodDurationMs = new Date() - startDate;
 
             try {
                 const trucksRef = collection(db, `artifacts/${appId}/users/${userId}/trucks`);
                 const trucksSnapshot = await getDocs(trucksRef);
                 const allTrucks = trucksSnapshot.docs.map(doc => doc.id);
 
-                const tripsRef = collection(db, `artifacts/${appId}/users/${userId}/trips`);
-                const q = query(tripsRef, where("endTime", ">=", startTimestamp));
-                const tripsSnapshot = await getDocs(q);
+                const logsRef = collection(db, `artifacts/${appId}/users/${userId}/activity_logs`);
+                const q = query(logsRef, where("endTime", ">=", startTimestamp));
+                const logsSnapshot = await getDocs(q);
 
                 const reportData = {};
-                allTrucks.forEach(truckNum => { reportData[truckNum] = { trips: 0, tripDurationMs: 0 }; });
-                tripsSnapshot.forEach(doc => {
-                    const trip = doc.data();
-                    if (reportData[trip.truckNumber]) {
-                        reportData[trip.truckNumber].trips++;
-                        reportData[trip.truckNumber].tripDurationMs += trip.endTime.toMillis() - trip.startTime.toMillis();
+                allTrucks.forEach(truckNum => {
+                    reportData[truckNum] = {
+                        trips: 0,
+                        tripDurationMs: 0,
+                        idleRepairMs: 0,
+                        idleLunchMs: 0,
+                        idleHolidayMs: 0,
+                        otherDutyGravellingMs: 0,
+                        otherDutyCSRMs: 0,
+                        otherDutyOthersMs: 0,
+                    };
+                });
+
+                logsSnapshot.forEach(doc => {
+                    const log = doc.data();
+                    if (!reportData[log.truckNumber]) return; // Skip logs for deleted trucks
+
+                    const duration = log.endTime.toMillis() - log.startTime.toMillis();
+
+                    if (log.status === 'Ongoing Trip') {
+                        reportData[log.truckNumber].trips++;
+                        reportData[log.truckNumber].tripDurationMs += duration;
+                    } else if (log.status === 'Idle') {
+                        if (log.detail === 'Repair') reportData[log.truckNumber].idleRepairMs += duration;
+                        else if (log.detail === 'Lunch Break') reportData[log.truckNumber].idleLunchMs += duration;
+                        else if (log.detail === 'Holiday') reportData[log.truckNumber].idleHolidayMs += duration;
+                    } else if (log.status === 'On Other Duty') {
+                        if (log.detail === 'Gravelling') reportData[log.truckNumber].otherDutyGravellingMs += duration;
+                        else if (log.detail === 'CSR') reportData[log.truckNumber].otherDutyCSRMs += duration;
+                        else reportData[log.truckNumber].otherDutyOthersMs += duration;
                     }
                 });
-                renderReportTable(reportData, periodDurationMs);
+                renderReportTable(reportData);
             } catch (error) {
                 console.error("Error generating report:", error);
-                reportContainer.innerHTML = '<p class="text-red-500">Failed to generate report.</p>';
+                reportContainer.innerHTML = '<p class="text-red-500">Failed to generate detailed report.</p>';
             }
         }
         
-        function renderReportTable(data, periodDurationMs) {
+        function renderReportTable(data) {
             if (Object.keys(data).length === 0) {
-                reportContainer.innerHTML = '<p class="text-gray-500">No data available for this period.</p>';
+                reportContainer.innerHTML = '<p class="text-gray-500">No truck data available for this period.</p>';
                 return;
             }
-            let tableHTML = `<div class="overflow-x-auto"><table class="min-w-full bg-white rounded-lg shadow"><thead class="bg-gray-100"><tr>
-                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">Truck Number</th>
-                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">Total Trips</th>
-                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">Total Non-Trip Hours (Approx.)</th>
-                            </tr></thead><tbody class="divide-y divide-gray-200">`;
+            let tableHTML = `<div class="overflow-x-auto bg-white rounded-lg shadow"><table class="min-w-full text-sm"><thead class="bg-gray-100"><tr>
+                <th scope="col" class="px-4 py-3 text-left font-medium text-gray-600">Truck</th>
+                <th scope="col" class="px-4 py-3 text-left font-medium text-gray-600">Total Trips</th>
+                <th scope="col" class="px-4 py-3 text-left font-medium text-gray-600">Avg. Trip Time</th>
+                <th scope="col" class="px-4 py-3 text-left font-medium text-gray-600">Repair (hrs)</th>
+                <th scope="col" class="px-4 py-3 text-left font-medium text-gray-600">Lunch (hrs)</th>
+                <th scope="col" class="px-4 py-3 text-left font-medium text-gray-600">Gravelling (hrs)</th>
+                <th scope="col" class="px-4 py-3 text-left font-medium text-gray-600">CSR (hrs)</th>
+            </tr></thead><tbody class="divide-y divide-gray-200">`;
+
             for (const truckNumber in data) {
-                const { trips, tripDurationMs } = data[truckNumber];
-                const idleMs = periodDurationMs - tripDurationMs;
-                const idleHours = (idleMs > 0 ? idleMs / 3600000 : 0).toFixed(2);
-                tableHTML += `<tr>
-                        <td class="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">${truckNumber}</td>
-                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-700">${trips}</td>
-                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-700">${idleHours} hours</td>
-                    </tr>`;
+                const d = data[truckNumber];
+                const avgTripTimeMins = d.trips > 0 ? (d.tripDurationMs / d.trips / 60000).toFixed(0) : 0;
+                const toHours = (ms) => (ms / 3600000).toFixed(2);
+
+                tableHTML += `<tr class="hover:bg-gray-50">
+                    <td class="px-4 py-3 font-medium text-gray-900">${truckNumber}</td>
+                    <td class="px-4 py-3 text-gray-700">${d.trips}</td>
+                    <td class="px-4 py-3 text-gray-700">${avgTripTimeMins} mins</td>
+                    <td class="px-4 py-3 text-gray-700">${toHours(d.idleRepairMs)}</td>
+                    <td class="px-4 py-3 text-gray-700">${toHours(d.idleLunchMs)}</td>
+                    <td class="px-4 py-3 text-gray-700">${toHours(d.otherDutyGravellingMs)}</td>
+                    <td class="px-4 py-3 text-gray-700">${toHours(d.otherDutyCSRMs)}</td>
+                </tr>`;
             }
             tableHTML += `</tbody></table></div>`;
             reportContainer.innerHTML = tableHTML;
@@ -438,7 +471,7 @@
 
         <main id="reports-view" class="hidden">
              <div class="bg-white p-6 rounded-lg shadow-md border border-gray-200 mb-6">
-                <h2 class="text-xl font-semibold text-gray-700 mb-4">Trip Reports</h2>
+                <h2 class="text-xl font-semibold text-gray-700 mb-4">Detailed Activity Reports</h2>
                 <div class="flex space-x-2">
                     <button id="report-daily" class="bg-gray-200 hover:bg-gray-300 text-gray-800 font-bold py-2 px-4 rounded-lg text-sm">Daily</button>
                     <button id="report-weekly" class="bg-gray-200 hover:bg-gray-300 text-gray-800 font-bold py-2 px-4 rounded-lg text-sm">Weekly</button>
@@ -458,7 +491,6 @@
             <form id="update-form">
                 <p class="text-sm text-gray-600 mb-4">Select the new status for the truck.</p>
                 <div class="space-y-2">
-                    <!-- Main Status Options -->
                     <label class="block border border-gray-200 p-3 rounded-lg has-[:checked]:bg-blue-50 has-[:checked]:border-blue-400">
                         <input type="radio" id="status-option-completed" name="status-option" value="completed" class="sr-only" checked>
                         <span class="font-medium text-gray-900">Completed Trip (Now Idle)</span>
@@ -481,12 +513,10 @@
                     </label>
                 </div>
                 
-                <!-- Detail Sections -->
                 <div id="ongoing-trip-group" class="mt-4 hidden">
                     <label for="new-destination" class="block text-sm font-medium text-gray-700">New Destination</label>
                     <input type="text" id="new-destination" placeholder="e.g., Field 12A" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm">
                 </div>
-
                 <div id="idle-reason-group" class="mt-4 hidden">
                     <label for="idle-reason-select" class="block text-sm font-medium text-gray-700">Reason for Idling</label>
                     <select id="idle-reason-select" class="mt-1 block w-full pl-3 pr-10 py-2 text-base border-gray-300 focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm rounded-md">
@@ -495,7 +525,6 @@
                         <option>Holiday</option>
                     </select>
                 </div>
-
                 <div id="other-duty-group" class="mt-4 hidden">
                     <label for="other-duty-select" class="block text-sm font-medium text-gray-700">Duty Type</label>
                     <select id="other-duty-select" class="mt-1 block w-full pl-3 pr-10 py-2 text-base border-gray-300 focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm rounded-md">
