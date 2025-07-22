@@ -1,0 +1,517 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FFB Truck Live Tracking</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <script type="module">
+        // Firebase Imports
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { 
+            getFirestore, 
+            doc, 
+            setDoc, 
+            addDoc,
+            getDoc,
+            updateDoc,
+            onSnapshot, 
+            collection, 
+            query, 
+            where, 
+            getDocs,
+            Timestamp,
+            serverTimestamp,
+            setLogLevel
+        } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // --- CONFIGURATION ---
+        const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'ffb-truck-tracker-app';
+
+        // --- FIREBASE INITIALIZATION ---
+        let app, auth, db, userId;
+        let isAuthReady = false;
+
+        function initializeFirebase() {
+            try {
+                app = initializeApp(firebaseConfig);
+                auth = getAuth(app);
+                db = getFirestore(app);
+                setLogLevel('error'); // Use 'debug' for detailed logs
+
+                onAuthStateChanged(auth, async (user) => {
+                    if (user) {
+                        userId = user.uid;
+                        isAuthReady = true;
+                        console.log("Authenticated User ID:", userId);
+                        initializeAppLogic();
+                    } else {
+                        await signInAnonymously(auth);
+                    }
+                });
+            } catch (error) {
+                console.error("Firebase Initialization Error:", error);
+                displayMessage("Error connecting to the database. Please refresh.", "error");
+            }
+        }
+        
+        // --- DOM ELEMENTS ---
+        const dashboardView = document.getElementById('dashboard-view');
+        const reportsView = document.getElementById('reports-view');
+        const dashboardTab = document.getElementById('dashboard-tab');
+        const reportsTab = document.getElementById('reports-tab');
+        const truckGrid = document.getElementById('truck-grid');
+        const addTruckForm = document.getElementById('add-truck-form');
+        const newTruckInput = document.getElementById('new-truck-input');
+        const updateModal = document.getElementById('update-modal');
+        const closeModalButton = document.getElementById('close-modal');
+        const updateForm = document.getElementById('update-form');
+        const modalTruckNumber = document.getElementById('modal-truck-number');
+        const messageBanner = document.getElementById('message-banner');
+        const reportContainer = document.getElementById('report-container');
+
+        // Modal form elements
+        const statusOptionCompleted = document.getElementById('status-option-completed');
+        const statusOptionOngoing = document.getElementById('status-option-ongoing');
+        const statusOptionIdle = document.getElementById('status-option-idle');
+        const statusOptionOtherDuty = document.getElementById('status-option-other-duty');
+
+        const ongoingTripGroup = document.getElementById('ongoing-trip-group');
+        const idleReasonGroup = document.getElementById('idle-reason-group');
+        const otherDutyGroup = document.getElementById('other-duty-group');
+
+        const newDestinationInput = document.getElementById('new-destination');
+        const idleReasonSelect = document.getElementById('idle-reason-select');
+        const otherDutySelect = document.getElementById('other-duty-select');
+        const otherDutyDetailInput = document.getElementById('other-duty-detail');
+
+
+        let currentTruckToUpdate = null;
+        let truckListeners = [];
+
+        // --- APPLICATION LOGIC ---
+        function initializeAppLogic() {
+            if (!isAuthReady) return;
+            setupEventListeners();
+            listenForTrucks();
+            setInterval(updateAllTimers, 60000);
+        }
+
+        function setupEventListeners() {
+            dashboardTab.addEventListener('click', () => switchView('dashboard'));
+            reportsTab.addEventListener('click', () => {
+                switchView('reports');
+                generateReport('daily');
+            });
+            addTruckForm.addEventListener('submit', handleAddTruck);
+
+            // Modal controls
+            closeModalButton.addEventListener('click', () => updateModal.classList.add('hidden'));
+            updateModal.addEventListener('click', (e) => {
+                if (e.target === updateModal) updateModal.classList.add('hidden');
+            });
+            updateForm.addEventListener('submit', handleUpdateStatus);
+
+            // Modal radio button change listeners to show/hide sections
+            const statusOptions = [statusOptionCompleted, statusOptionOngoing, statusOptionIdle, statusOptionOtherDuty];
+            statusOptions.forEach(radio => {
+                radio.addEventListener('change', () => {
+                    ongoingTripGroup.classList.toggle('hidden', !statusOptionOngoing.checked);
+                    idleReasonGroup.classList.toggle('hidden', !statusOptionIdle.checked);
+                    otherDutyGroup.classList.toggle('hidden', !statusOptionOtherDuty.checked);
+                });
+            });
+            
+            otherDutySelect.addEventListener('change', () => {
+                 otherDutyDetailInput.classList.toggle('hidden', otherDutySelect.value !== 'Others');
+            });
+
+            document.getElementById('report-daily').addEventListener('click', () => generateReport('daily'));
+            document.getElementById('report-weekly').addEventListener('click', () => generateReport('weekly'));
+            document.getElementById('report-monthly').addEventListener('click', () => generateReport('monthly'));
+        }
+
+        function switchView(view) {
+            dashboardView.classList.toggle('hidden', view !== 'dashboard');
+            reportsView.classList.toggle('hidden', view !== 'reports');
+            dashboardTab.classList.toggle('bg-blue-600', view === 'dashboard');
+            dashboardTab.classList.toggle('text-white', view === 'dashboard');
+            dashboardTab.classList.toggle('text-gray-600', view !== 'dashboard');
+            dashboardTab.classList.toggle('bg-gray-200', view !== 'dashboard');
+            reportsTab.classList.toggle('bg-blue-600', view === 'reports');
+            reportsTab.classList.toggle('text-white', view === 'reports');
+            reportsTab.classList.toggle('text-gray-600', view !== 'reports');
+            reportsTab.classList.toggle('bg-gray-200', view !== 'reports');
+        }
+
+        // --- FIRESTORE OPERATIONS ---
+
+        function listenForTrucks() {
+            if (!isAuthReady) return;
+            const trucksCollectionRef = collection(db, `artifacts/${appId}/users/${userId}/trucks`);
+            
+            if (typeof truckListeners['main'] === 'function') truckListeners['main']();
+
+            truckListeners['main'] = onSnapshot(trucksCollectionRef, (snapshot) => {
+                truckGrid.innerHTML = snapshot.empty ? '<p class="text-gray-500 col-span-full">No trucks added yet. Add a truck to begin.</p>' : '';
+                snapshot.forEach(doc => renderTruckCard(doc.data()));
+                updateAllTimers();
+            }, (error) => {
+                console.error("Error listening for trucks:", error);
+                displayMessage("Could not fetch truck data. Check connection.", "error");
+            });
+        }
+
+        async function handleAddTruck(e) {
+            e.preventDefault();
+            const truckNumber = newTruckInput.value.trim().toUpperCase();
+            if (!truckNumber) return displayMessage("Truck number cannot be empty.", "error");
+
+            const truckDocRef = doc(db, `artifacts/${appId}/users/${userId}/trucks`, truckNumber);
+            
+            try {
+                const docSnap = await getDoc(truckDocRef);
+                if (docSnap.exists()) return displayMessage(`Truck ${truckNumber} already exists.`, "error");
+
+                await setDoc(truckDocRef, {
+                    truckNumber: truckNumber,
+                    status: 'Idle',
+                    detail: 'N/A',
+                    lastStatusUpdate: serverTimestamp()
+                });
+                displayMessage(`Truck ${truckNumber} added successfully.`, "success");
+                newTruckInput.value = '';
+            } catch (error) {
+                console.error("Error adding truck:", error);
+                displayMessage("Failed to add truck.", "error");
+            }
+        }
+        
+        async function handleUpdateStatus(e) {
+            e.preventDefault();
+            if (!currentTruckToUpdate) return;
+
+            const truckDocRef = doc(db, `artifacts/${appId}/users/${userId}/trucks`, currentTruckToUpdate);
+            let updateData = {};
+            let successMessage = '';
+
+            try {
+                if (statusOptionCompleted.checked) {
+                    const truckDoc = await getDoc(truckDocRef);
+                    if (!truckDoc.exists()) throw new Error("Truck not found");
+                    const truckData = truckDoc.data();
+
+                    if (truckData.status === 'Ongoing Trip') {
+                        const tripsCollectionRef = collection(db, `artifacts/${appId}/users/${userId}/trips`);
+                        await addDoc(tripsCollectionRef, {
+                            truckNumber: truckData.truckNumber,
+                            startTime: truckData.lastStatusUpdate,
+                            endTime: serverTimestamp(),
+                            destination: truckData.detail
+                        });
+                    }
+                    updateData = { status: 'Idle', detail: 'N/A', lastStatusUpdate: serverTimestamp() };
+                    successMessage = `Truck ${currentTruckToUpdate} is now Idle.`;
+
+                } else if (statusOptionOngoing.checked) {
+                    const newDestination = newDestinationInput.value.trim();
+                    if (!newDestination) return displayMessage("Please enter a destination.", "error");
+                    updateData = { status: 'Ongoing Trip', detail: newDestination, lastStatusUpdate: serverTimestamp() };
+                    successMessage = `Truck ${currentTruckToUpdate} is on its way to ${newDestination}.`;
+
+                } else if (statusOptionIdle.checked) {
+                    const reason = idleReasonSelect.value;
+                    updateData = { status: `Idle (${reason})`, detail: 'N/A', lastStatusUpdate: serverTimestamp() };
+                    successMessage = `Truck ${currentTruckToUpdate} status set to Idle (${reason}).`;
+
+                } else if (statusOptionOtherDuty.checked) {
+                    let duty = otherDutySelect.value;
+                    if (duty === 'Others') {
+                        const customDuty = otherDutyDetailInput.value.trim();
+                        if (!customDuty) return displayMessage("Please specify the 'other' duty.", "error");
+                        duty = customDuty;
+                    }
+                    updateData = { status: 'On Other Duty', detail: duty, lastStatusUpdate: serverTimestamp() };
+                    successMessage = `Truck ${currentTruckToUpdate} is now On Other Duty: ${duty}.`;
+                }
+
+                await updateDoc(truckDocRef, updateData);
+                displayMessage(successMessage, "success");
+                updateModal.classList.add('hidden');
+                currentTruckToUpdate = null;
+
+            } catch (error) {
+                console.error("Error updating status:", error);
+                displayMessage("Failed to update status.", "error");
+            }
+        }
+
+        // --- UI RENDERING ---
+
+        function renderTruckCard(data) {
+            const { truckNumber, status, detail, lastStatusUpdate } = data;
+            
+            const card = document.createElement('div');
+            card.className = 'bg-white p-4 rounded-lg shadow-md border border-gray-200 flex flex-col justify-between';
+            card.id = `truck-${truckNumber.replace(/\s+/g, '-')}`;
+
+            let statusColorClass = 'bg-gray-100 text-gray-800';
+            if (status.startsWith('Idle')) statusColorClass = 'bg-yellow-100 text-yellow-800 border-yellow-300';
+            if (status === 'Ongoing Trip') statusColorClass = 'bg-green-100 text-green-800 border-green-300';
+            if (status === 'On Other Duty') statusColorClass = 'bg-purple-100 text-purple-800 border-purple-300';
+            
+            let detailHtml = '';
+            if (status === 'Ongoing Trip' || status === 'On Other Duty') {
+                detailHtml = `<p class="text-sm text-gray-600 mt-2">Detail: <span class="font-semibold">${detail}</span></p>`;
+            }
+
+            const timeInStatus = lastStatusUpdate ? calculateTimeDifference(lastStatusUpdate.toDate()) : 'N/A';
+
+            card.innerHTML = `
+                <div>
+                    <div class="flex justify-between items-start">
+                        <h3 class="text-xl font-bold text-gray-800">${truckNumber}</h3>
+                        <span class="text-xs font-semibold px-2.5 py-0.5 rounded-full ${statusColorClass}">${status}</span>
+                    </div>
+                    ${detailHtml}
+                </div>
+                <div>
+                    <p class="text-xs text-gray-500 mt-4">Time in current status:</p>
+                    <p class="font-mono text-sm text-gray-700" data-timestamp="${lastStatusUpdate ? lastStatusUpdate.toMillis() : ''}">${timeInStatus}</p>
+                    <button data-truck="${truckNumber}" class="update-status-btn mt-4 w-full bg-blue-500 hover:bg-blue-600 text-white font-bold py-2 px-4 rounded-lg transition duration-300">
+                        Update Status
+                    </button>
+                </div>
+            `;
+            truckGrid.appendChild(card);
+
+            card.querySelector('.update-status-btn').addEventListener('click', () => {
+                showUpdateModal(truckNumber);
+            });
+        }
+        
+        function showUpdateModal(truckNumber) {
+            currentTruckToUpdate = truckNumber;
+            modalTruckNumber.textContent = truckNumber;
+            updateForm.reset();
+            statusOptionCompleted.checked = true;
+            ongoingTripGroup.classList.add('hidden');
+            idleReasonGroup.classList.add('hidden');
+            otherDutyGroup.classList.add('hidden');
+            otherDutyDetailInput.classList.add('hidden');
+            updateModal.classList.remove('hidden');
+        }
+
+        function updateAllTimers() {
+            document.querySelectorAll('[data-timestamp]').forEach(el => {
+                const timestamp = parseInt(el.dataset.timestamp, 10);
+                if (!isNaN(timestamp)) {
+                    el.textContent = calculateTimeDifference(new Date(timestamp));
+                }
+            });
+        }
+
+        function calculateTimeDifference(startTime) {
+            const now = new Date();
+            let diff = now - startTime;
+            const days = Math.floor(diff / 86400000);
+            diff -= days * 86400000;
+            const hours = Math.floor(diff / 3600000);
+            diff -= hours * 3600000;
+            const mins = Math.floor(diff / 60000);
+            let result = '';
+            if (days > 0) result += `${days}d `;
+            if (hours > 0 || days > 0) result += `${hours}h `;
+            result += `${mins}m`;
+            return result.trim();
+        }
+
+        function displayMessage(text, type = "info") {
+            const colors = { info: 'bg-blue-100 text-blue-800', success: 'bg-green-100 text-green-800', error: 'bg-red-100 text-red-800' };
+            messageBanner.className = `p-4 mb-4 text-sm rounded-lg ${colors[type]}`;
+            messageBanner.textContent = text;
+            messageBanner.classList.remove('hidden');
+            setTimeout(() => messageBanner.classList.add('hidden'), 4000);
+        }
+
+        // --- REPORTING ---
+        async function generateReport(period) {
+            if (!isAuthReady) return;
+            reportContainer.innerHTML = '<p class="text-gray-500">Generating report...</p>';
+            const now = new Date();
+            let startDate;
+            if (period === 'daily') startDate = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+            else if (period === 'weekly') {
+                startDate = new Date(now.setDate(now.getDate() - now.getDay()));
+                startDate.setHours(0, 0, 0, 0);
+            } else startDate = new Date(now.getFullYear(), now.getMonth(), 1);
+            
+            const startTimestamp = Timestamp.fromDate(startDate);
+            const periodDurationMs = new Date() - startDate;
+
+            try {
+                const trucksRef = collection(db, `artifacts/${appId}/users/${userId}/trucks`);
+                const trucksSnapshot = await getDocs(trucksRef);
+                const allTrucks = trucksSnapshot.docs.map(doc => doc.id);
+
+                const tripsRef = collection(db, `artifacts/${appId}/users/${userId}/trips`);
+                const q = query(tripsRef, where("endTime", ">=", startTimestamp));
+                const tripsSnapshot = await getDocs(q);
+
+                const reportData = {};
+                allTrucks.forEach(truckNum => { reportData[truckNum] = { trips: 0, tripDurationMs: 0 }; });
+                tripsSnapshot.forEach(doc => {
+                    const trip = doc.data();
+                    if (reportData[trip.truckNumber]) {
+                        reportData[trip.truckNumber].trips++;
+                        reportData[trip.truckNumber].tripDurationMs += trip.endTime.toMillis() - trip.startTime.toMillis();
+                    }
+                });
+                renderReportTable(reportData, periodDurationMs);
+            } catch (error) {
+                console.error("Error generating report:", error);
+                reportContainer.innerHTML = '<p class="text-red-500">Failed to generate report.</p>';
+            }
+        }
+        
+        function renderReportTable(data, periodDurationMs) {
+            if (Object.keys(data).length === 0) {
+                reportContainer.innerHTML = '<p class="text-gray-500">No data available for this period.</p>';
+                return;
+            }
+            let tableHTML = `<div class="overflow-x-auto"><table class="min-w-full bg-white rounded-lg shadow"><thead class="bg-gray-100"><tr>
+                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">Truck Number</th>
+                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">Total Trips</th>
+                                <th class="px-6 py-3 text-left text-xs font-medium text-gray-600 uppercase tracking-wider">Total Non-Trip Hours (Approx.)</th>
+                            </tr></thead><tbody class="divide-y divide-gray-200">`;
+            for (const truckNumber in data) {
+                const { trips, tripDurationMs } = data[truckNumber];
+                const idleMs = periodDurationMs - tripDurationMs;
+                const idleHours = (idleMs > 0 ? idleMs / 3600000 : 0).toFixed(2);
+                tableHTML += `<tr>
+                        <td class="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">${truckNumber}</td>
+                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-700">${trips}</td>
+                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-700">${idleHours} hours</td>
+                    </tr>`;
+            }
+            tableHTML += `</tbody></table></div>`;
+            reportContainer.innerHTML = tableHTML;
+        }
+
+        window.onload = initializeFirebase;
+    </script>
+    <style>
+        body { font-family: 'Inter', sans-serif; }
+        .hidden { display: none; }
+    </style>
+</head>
+<body class="bg-gray-50">
+
+    <div class="container mx-auto p-4 sm:p-6 lg:p-8 max-w-7xl">
+        <header class="mb-6">
+            <h1 class="text-3xl font-bold text-gray-800">FFB Truck Live Platform</h1>
+            <p class="text-gray-600 mt-1">A simple interface for the weighbridge clerk to manage truck statuses.</p>
+        </header>
+
+        <div id="message-banner" class="hidden"></div>
+
+        <div class="mb-6">
+            <div class="flex border-b border-gray-200">
+                <button id="dashboard-tab" class="px-4 py-2 font-semibold text-sm rounded-t-lg bg-blue-600 text-white focus:outline-none">Dashboard</button>
+                <button id="reports-tab" class="px-4 py-2 font-semibold text-sm rounded-t-lg text-gray-600 bg-gray-200 hover:bg-gray-300 focus:outline-none">Reports</button>
+            </div>
+        </div>
+
+        <main id="dashboard-view">
+            <div class="bg-white p-6 rounded-lg shadow-md border border-gray-200 mb-6">
+                <h2 class="text-xl font-semibold text-gray-700 mb-4">Add a New Truck</h2>
+                <form id="add-truck-form" class="flex flex-col sm:flex-row gap-4">
+                    <input id="new-truck-input" type="text" placeholder="e.g., WXB 1234" class="flex-grow px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition">
+                    <button type="submit" class="bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-6 rounded-lg transition duration-300">Add Truck</button>
+                </form>
+            </div>
+            <div id="truck-grid" class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-6"></div>
+        </main>
+
+        <main id="reports-view" class="hidden">
+             <div class="bg-white p-6 rounded-lg shadow-md border border-gray-200 mb-6">
+                <h2 class="text-xl font-semibold text-gray-700 mb-4">Trip Reports</h2>
+                <div class="flex space-x-2">
+                    <button id="report-daily" class="bg-gray-200 hover:bg-gray-300 text-gray-800 font-bold py-2 px-4 rounded-lg text-sm">Daily</button>
+                    <button id="report-weekly" class="bg-gray-200 hover:bg-gray-300 text-gray-800 font-bold py-2 px-4 rounded-lg text-sm">Weekly</button>
+                    <button id="report-monthly" class="bg-gray-200 hover:bg-gray-300 text-gray-800 font-bold py-2 px-4 rounded-lg text-sm">Monthly</button>
+                </div>
+             </div>
+             <div id="report-container"></div>
+        </main>
+    </div>
+
+    <div id="update-modal" class="hidden fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
+        <div class="bg-white rounded-lg shadow-xl p-6 w-full max-w-md">
+            <div class="flex justify-between items-center mb-4">
+                <h2 class="text-xl font-bold text-gray-800">Update Status for <span id="modal-truck-number"></span></h2>
+                <button id="close-modal" class="text-gray-400 hover:text-gray-600">&times;</button>
+            </div>
+            <form id="update-form">
+                <p class="text-sm text-gray-600 mb-4">Select the new status for the truck.</p>
+                <div class="space-y-2">
+                    <!-- Main Status Options -->
+                    <label class="block border border-gray-200 p-3 rounded-lg has-[:checked]:bg-blue-50 has-[:checked]:border-blue-400">
+                        <input type="radio" id="status-option-completed" name="status-option" value="completed" class="sr-only" checked>
+                        <span class="font-medium text-gray-900">Completed Trip (Now Idle)</span>
+                        <p class="text-xs text-gray-500">Use when the truck has finished unloading FFB.</p>
+                    </label>
+                    <label class="block border border-gray-200 p-3 rounded-lg has-[:checked]:bg-blue-50 has-[:checked]:border-blue-400">
+                        <input type="radio" id="status-option-ongoing" name="status-option" value="ongoing" class="sr-only">
+                        <span class="font-medium text-gray-900">Ongoing Trip</span>
+                        <p class="text-xs text-gray-500">Use when the truck is leaving for a new FFB destination.</p>
+                    </label>
+                    <label class="block border border-gray-200 p-3 rounded-lg has-[:checked]:bg-blue-50 has-[:checked]:border-blue-400">
+                        <input type="radio" id="status-option-idle" name="status-option" value="idle" class="sr-only">
+                        <span class="font-medium text-gray-900">Idle (Other Reasons)</span>
+                        <p class="text-xs text-gray-500">Set status for non-trip idle time.</p>
+                    </label>
+                    <label class="block border border-gray-200 p-3 rounded-lg has-[:checked]:bg-blue-50 has-[:checked]:border-blue-400">
+                        <input type="radio" id="status-option-other-duty" name="status-option" value="other-duty" class="sr-only">
+                        <span class="font-medium text-gray-900">On Other Duty</span>
+                        <p class="text-xs text-gray-500">For non-FFB related tasks.</p>
+                    </label>
+                </div>
+                
+                <!-- Detail Sections -->
+                <div id="ongoing-trip-group" class="mt-4 hidden">
+                    <label for="new-destination" class="block text-sm font-medium text-gray-700">New Destination</label>
+                    <input type="text" id="new-destination" placeholder="e.g., Field 12A" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm">
+                </div>
+
+                <div id="idle-reason-group" class="mt-4 hidden">
+                    <label for="idle-reason-select" class="block text-sm font-medium text-gray-700">Reason for Idling</label>
+                    <select id="idle-reason-select" class="mt-1 block w-full pl-3 pr-10 py-2 text-base border-gray-300 focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm rounded-md">
+                        <option>Repair</option>
+                        <option>Lunch Break</option>
+                        <option>Holiday</option>
+                    </select>
+                </div>
+
+                <div id="other-duty-group" class="mt-4 hidden">
+                    <label for="other-duty-select" class="block text-sm font-medium text-gray-700">Duty Type</label>
+                    <select id="other-duty-select" class="mt-1 block w-full pl-3 pr-10 py-2 text-base border-gray-300 focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm rounded-md">
+                        <option>Gravelling</option>
+                        <option>CSR</option>
+                        <option>Others</option>
+                    </select>
+                    <input type="text" id="other-duty-detail" placeholder="Specify other duty" class="mt-2 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm hidden">
+                </div>
+
+                <div class="mt-6 flex justify-end">
+                    <button type="submit" class="bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-6 rounded-lg transition duration-300">Save Update</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+</body>
+</html>
